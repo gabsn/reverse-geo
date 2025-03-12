@@ -1,0 +1,81 @@
+#!/bin/bash
+# Script to apply PostgreSQL performance settings
+
+set -e
+
+# Detect PostgreSQL data directory
+if command -v brew &> /dev/null && brew list postgresql@14 &> /dev/null; then
+    # macOS with Homebrew
+    PG_DATA_DIR=$(brew --prefix)/var/postgresql@14
+    echo "Detected PostgreSQL data directory at: $PG_DATA_DIR"
+elif [ -d "/var/lib/postgresql/14/main" ]; then
+    # Debian/Ubuntu style
+    PG_DATA_DIR="/var/lib/postgresql/14/main"
+    echo "Detected PostgreSQL data directory at: $PG_DATA_DIR"
+else
+    # Ask user
+    echo "Could not automatically detect PostgreSQL data directory."
+    read -p "Please enter the path to your PostgreSQL data directory: " PG_DATA_DIR
+fi
+
+# Check if the directory exists
+if [ ! -d "$PG_DATA_DIR" ]; then
+    echo "Error: Directory $PG_DATA_DIR does not exist."
+    exit 1
+fi
+
+# Check if postgresql.conf exists
+if [ ! -f "$PG_DATA_DIR/postgresql.conf" ]; then
+    echo "Error: postgresql.conf not found in $PG_DATA_DIR."
+    exit 1
+fi
+
+# Create backup of current configuration
+BACKUP_FILE="$PG_DATA_DIR/postgresql.conf.backup.$(date +%Y%m%d%H%M%S)"
+echo "Creating backup of current configuration at: $BACKUP_FILE"
+cp "$PG_DATA_DIR/postgresql.conf" "$BACKUP_FILE"
+
+# Copy our performance configuration
+CONFIG_DIR="$(dirname "$(dirname "$0")")/config"
+PERFORMANCE_CONF="$CONFIG_DIR/postgresql-performance.conf"
+
+echo "Applying performance settings..."
+
+# Check if include directive already exists
+if grep -q "include.*postgresql-performance.conf" "$PG_DATA_DIR/postgresql.conf"; then
+    echo "Performance configuration already included in postgresql.conf"
+else
+    # Copy the performance configuration file to PostgreSQL data directory
+    cp "$PERFORMANCE_CONF" "$PG_DATA_DIR/"
+    
+    # Add include directive to postgresql.conf
+    echo "" >> "$PG_DATA_DIR/postgresql.conf"
+    echo "# Include performance settings" >> "$PG_DATA_DIR/postgresql.conf"
+    echo "include = 'postgresql-performance.conf'" >> "$PG_DATA_DIR/postgresql.conf"
+    
+    echo "Added include directive to postgresql.conf"
+fi
+
+echo ""
+echo "PostgreSQL performance configuration has been applied."
+echo "You need to restart PostgreSQL for the changes to take effect."
+echo ""
+
+# Detect OS and provide restart instructions
+if command -v brew &> /dev/null; then
+    # macOS with Homebrew
+    echo "To restart PostgreSQL on macOS with Homebrew, run:"
+    echo "  brew services restart postgresql@14"
+elif command -v systemctl &> /dev/null; then
+    # Linux with systemd
+    echo "To restart PostgreSQL on Linux with systemd, run:"
+    echo "  sudo systemctl restart postgresql"
+else
+    # Generic instructions
+    echo "Please restart your PostgreSQL server using the appropriate method for your system."
+fi
+
+echo ""
+echo "Note: These settings allocate significant memory to PostgreSQL."
+echo "Make sure your system has enough RAM to accommodate these settings."
+echo "For production environments, you may need to adjust these values based on your specific needs." 

@@ -1,0 +1,225 @@
+#!/bin/bash
+# Script to start and stop PostgreSQL with optimized configuration
+
+set -e
+
+# Function to display usage information
+usage() {
+    echo "Usage: $0 [start|stop|restart|status]"
+    echo ""
+    echo "Commands:"
+    echo "  start    - Start PostgreSQL with optimized configuration"
+    echo "  stop     - Stop PostgreSQL server"
+    echo "  restart  - Restart PostgreSQL with optimized configuration"
+    echo "  status   - Check if PostgreSQL is running"
+    echo ""
+    exit 1
+}
+
+# Function to detect PostgreSQL version and commands
+detect_postgres() {
+    # Check if we're on macOS with Homebrew
+    if command -v brew &> /dev/null; then
+        # Find installed PostgreSQL versions
+        PG_VERSIONS=$(brew list | grep -E "^postgresql(@[0-9.]+)?$" || echo "")
+        
+        if [ -z "$PG_VERSIONS" ]; then
+            echo "PostgreSQL is not installed via Homebrew."
+            echo "Please install PostgreSQL first:"
+            echo "  brew install postgresql"
+            exit 1
+        fi
+        
+        # Use the latest version if multiple are installed
+        PG_VERSION=$(echo "$PG_VERSIONS" | grep -E "@" | sort -V | tail -1 || echo "postgresql")
+        
+        # If no versioned PostgreSQL found, use the default
+        if [ -z "$PG_VERSION" ]; then
+            PG_VERSION="postgresql"
+        fi
+        
+        echo "Detected PostgreSQL: $PG_VERSION (Homebrew)"
+        
+        # Set commands for Homebrew
+        START_CMD="brew services start $PG_VERSION"
+        STOP_CMD="brew services stop $PG_VERSION"
+        RESTART_CMD="brew services restart $PG_VERSION"
+        STATUS_CMD="brew services info $PG_VERSION"
+        
+        # Extract version number for data directory
+        if [[ "$PG_VERSION" =~ @([0-9.]+) ]]; then
+            PG_VERSION_NUM="${BASH_REMATCH[1]}"
+            PG_DATA_DIR="$(brew --prefix)/var/postgresql@$PG_VERSION_NUM"
+        else
+            PG_DATA_DIR="$(brew --prefix)/var/postgres"
+        fi
+        
+    # Check if we're on Linux with systemd
+    elif command -v systemctl &> /dev/null; then
+        # Find PostgreSQL service
+        PG_SERVICE=$(systemctl list-units --type=service | grep -E "postgresql.*\.service" | head -1 | awk '{print $1}' || echo "")
+        
+        if [ -z "$PG_SERVICE" ]; then
+            PG_SERVICE="postgresql"
+        fi
+        
+        echo "Detected PostgreSQL service: $PG_SERVICE (systemd)"
+        
+        # Set commands for systemd
+        START_CMD="sudo systemctl start $PG_SERVICE"
+        STOP_CMD="sudo systemctl stop $PG_SERVICE"
+        RESTART_CMD="sudo systemctl restart $PG_SERVICE"
+        STATUS_CMD="sudo systemctl status $PG_SERVICE"
+        
+        # Try to find data directory
+        if [ -d "/var/lib/postgresql" ]; then
+            # Find the highest version number
+            PG_VERSION_DIR=$(find /var/lib/postgresql -maxdepth 1 -type d -name "[0-9]*" | sort -V | tail -1)
+            if [ -n "$PG_VERSION_DIR" ]; then
+                PG_DATA_DIR="$PG_VERSION_DIR/main"
+            else
+                PG_DATA_DIR="/var/lib/postgresql/data"
+            fi
+        else
+            PG_DATA_DIR="/var/lib/postgresql/data"
+        fi
+    else
+        echo "Could not detect PostgreSQL installation method."
+        echo "This script supports PostgreSQL installed via Homebrew on macOS or systemd on Linux."
+        exit 1
+    fi
+    
+    echo "PostgreSQL data directory: $PG_DATA_DIR"
+}
+
+# Function to apply optimized configuration
+apply_config() {
+    echo "Checking for optimized configuration..."
+    
+    # Path to the configuration script
+    CONFIG_SCRIPT="$(dirname "$0")/configure-postgres"
+    
+    # Check if the configuration script exists
+    if [ ! -f "$CONFIG_SCRIPT" ]; then
+        echo "Error: Configuration script not found at $CONFIG_SCRIPT"
+        exit 1
+    fi
+    
+    # Check if configuration has already been applied
+    if [ -f "$PG_DATA_DIR/postgresql-performance.conf" ]; then
+        echo "Optimized configuration already applied."
+    else
+        echo "Applying optimized PostgreSQL configuration..."
+        bash "$CONFIG_SCRIPT"
+    fi
+}
+
+# Function to start PostgreSQL
+start_postgres() {
+    echo "Starting PostgreSQL..."
+    eval "$START_CMD"
+    
+    # Wait for PostgreSQL to start
+    echo "Waiting for PostgreSQL to start..."
+    for i in {1..30}; do
+        if pg_isready &>/dev/null; then
+            echo "PostgreSQL is now running."
+            
+            # Setup database and extensions
+            setup_database
+            
+            return 0
+        fi
+        sleep 1
+    done
+    
+    echo "Warning: PostgreSQL may not have started properly."
+    echo "Check status with: $0 status"
+}
+
+# Function to setup database and extensions
+setup_database() {
+    echo "Checking if database 'reverse_geo' exists..."
+    
+    # Check if database exists
+    if psql -lqt | cut -d \| -f 1 | grep -qw reverse_geo; then
+        echo "Database 'reverse_geo' already exists."
+    else
+        echo "Creating database 'reverse_geo'..."
+        createdb reverse_geo
+        echo "Database created successfully."
+    fi
+    
+    # Check and enable PostGIS extension
+    echo "Checking PostGIS extension..."
+    if psql -d reverse_geo -c "SELECT extname FROM pg_extension WHERE extname = 'postgis';" | grep -q postgis; then
+        echo "PostGIS extension already enabled."
+    else
+        echo "Enabling PostGIS extension..."
+        psql -d reverse_geo -c "CREATE EXTENSION postgis;"
+        echo "PostGIS extension enabled."
+    fi
+    
+    # Check and enable hstore extension
+    echo "Checking hstore extension..."
+    if psql -d reverse_geo -c "SELECT extname FROM pg_extension WHERE extname = 'hstore';" | grep -q hstore; then
+        echo "hstore extension already enabled."
+    else
+        echo "Enabling hstore extension..."
+        psql -d reverse_geo -c "CREATE EXTENSION hstore;"
+        echo "hstore extension enabled."
+    fi
+    
+    echo "Database setup complete."
+}
+
+# Function to stop PostgreSQL
+stop_postgres() {
+    echo "Stopping PostgreSQL..."
+    eval "$STOP_CMD"
+    echo "PostgreSQL stopped."
+}
+
+# Function to check PostgreSQL status
+check_status() {
+    echo "Checking PostgreSQL status..."
+    eval "$STATUS_CMD" || true
+    
+    if pg_isready &>/dev/null; then
+        echo "PostgreSQL is running and accepting connections."
+    else
+        echo "PostgreSQL is not accepting connections."
+    fi
+}
+
+# Main script logic
+if [ $# -ne 1 ]; then
+    usage
+fi
+
+# Detect PostgreSQL
+detect_postgres
+
+# Process command
+case "$1" in
+    start)
+        apply_config
+        start_postgres
+        ;;
+    stop)
+        stop_postgres
+        ;;
+    restart)
+        stop_postgres
+        apply_config
+        start_postgres
+        ;;
+    status)
+        check_status
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+exit 0 

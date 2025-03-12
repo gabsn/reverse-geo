@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Create a directory for Lua scripts if it doesn't exist
+mkdir -p lua
+
+# Run osm2pgsql with flex output mode
+osm2pgsql \
+  --create \
+  --database reverse_geo \
+  --output flex \
+  --style lua/admin-boundaries.lua \
+  --hstore-all \
+  --keep-coastlines \
+  --multi-geometry \
+  data/admin-boundaries.osm.pbf
+
+# Create indexes for better performance
+psql -d reverse_geo -c "CREATE INDEX boundaries_geom_idx ON boundaries USING GIST (geom);"
+psql -d reverse_geo -c "CREATE INDEX boundaries_admin_level_idx ON boundaries (admin_level);"
+psql -d reverse_geo -c "CREATE INDEX places_geom_idx ON places USING GIST (geom);"
+psql -d reverse_geo -c "CREATE INDEX admin_hierarchy_parent_id_idx ON admin_hierarchy (parent_id);"
+psql -d reverse_geo -c "CREATE INDEX admin_hierarchy_child_id_idx ON admin_hierarchy (child_id);"
+
+# Update child levels and names in the hierarchy table
+psql -d reverse_geo -c "
+UPDATE admin_hierarchy h
+SET 
+    child_level = b.admin_level,
+    child_name = b.name
+FROM 
+    boundaries b
+WHERE 
+    h.child_id = b.osm_id AND h.child_type = b.osm_type;
+"
+
+# Create a view for easier reverse geocoding
+psql -d reverse_geo -c "
+CREATE OR REPLACE VIEW reverse_geocode_view AS
+SELECT 
+    b.osm_id,
+    b.osm_type,
+    b.name,
+    b.admin_level,
+    parent.osm_id AS parent_id,
+    parent.osm_type AS parent_type,
+    parent.name AS parent_name,
+    parent.admin_level AS parent_level,
+    b.geom
+FROM 
+    boundaries b
+LEFT JOIN admin_hierarchy h ON b.osm_id = h.child_id AND b.osm_type = h.child_type
+LEFT JOIN boundaries parent ON h.parent_id = parent.osm_id AND h.parent_type = parent.osm_type
+WHERE 
+    b.admin_level IS NOT NULL;
+"

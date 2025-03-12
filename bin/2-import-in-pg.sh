@@ -56,9 +56,6 @@ osm2pgsql \
     --hstore-all \
     --keep-coastlines \
     --slim \
-    --cache 4096 \
-    --drop \
-    --verbose \
     data/admin-boundaries.osm.pbf
 
 echo "Creating indexes for better query performance..."
